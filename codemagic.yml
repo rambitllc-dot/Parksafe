@@ -1,0 +1,94 @@
+workflows:
+  ios-app-store:
+    name: ParkSafe SF — App Store
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    integrations:
+      app_store_connect: App Store Connect API
+
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.rambitllc.parksafesf
+      vars:
+        XCODE_PROJECT: "ParkSafeSF/ParkSafeSF.xcodeproj"
+        XCODE_SCHEME: "ParkSafeSF"
+        BUNDLE_ID: "com.rambitllc.parksafesf"
+        APP_STORE_APPLE_ID: "YOUR_APP_APPLE_ID"
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Unzip project if needed
+        script: |
+          if [ -f "ParkSafeSF.zip" ]; then
+            unzip -o ParkSafeSF.zip
+            echo "Unzipped successfully"
+          else
+            echo "No zip found, using existing structure"
+          fi
+
+      - name: Set Xcode version
+        script: xcode-select -p
+
+      - name: Install dependencies
+        script: |
+          if [ -f "ParkSafeSF/Podfile" ]; then
+            cd ParkSafeSF && pod install
+          else
+            echo "No Podfile found, skipping CocoaPods"
+          fi
+
+      - name: Set bundle identifier
+        script: |
+          cd ParkSafeSF
+          /usr/libexec/PlistBuddy -c \
+            "Set :CFBundleIdentifier $BUNDLE_ID" \
+            ParkSafeSF/Info.plist
+
+      - name: Build and archive
+        script: |
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$CM_BUILD_DIR/ParkSafeSF.xcarchive" \
+            clean archive \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$CM_TEAM_ID" \
+            -allowProvisioningUpdates
+
+      - name: Export IPA
+        script: |
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$CM_BUILD_DIR/ParkSafeSF.xcarchive" \
+            -exportPath "$CM_EXPORT_DIR" \
+            -exportOptionsPlist /dev/stdin <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>$CM_TEAM_ID</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>signingStyle</key>
+            <string>automatic</string>
+          </dict>
+          </plist>
+          EOF
+
+    artifacts:
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_BUILD_DIR/*.xcarchive
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false
+        submit_to_app_store: false
