@@ -23,8 +23,8 @@ workflows:
     scripts:
       - name: Unzip project
         script: |
-          if [ -f "ParkSafeSF.zip" ]; then
-            unzip -o ParkSafeSF.zip
+          if [ -f "ParkSafe.zip" ]; then
+            unzip -o ParkSafe.zip
             echo "Unzipped successfully"
           else
             echo "No zip found"
