@@ -6,7 +6,7 @@ workflows:
 
     environment:
       groups:
-        - IOS
+        - ios
       vars:
         XCODE_PROJECT: "ParkSafeSF/ParkSafeSF.xcodeproj"
         XCODE_SCHEME: "ParkSafeSF"
