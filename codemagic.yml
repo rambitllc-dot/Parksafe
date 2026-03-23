@@ -1,0 +1,136 @@
+workflows:
+  ios-app-store:
+    name: ParkSafe — App Store
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      groups:
+        - ios
+      vars:
+        XCODE_SCHEME: "ParkSafeSF"
+        BUNDLE_ID: "com.rambitllc.parksafe"
+      xcode: latest
+
+    scripts:
+      - name: Unzip project
+        script: |
+          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -1)
+          echo "Found zip: $ZIP_FILE"
+          if [ -n "$ZIP_FILE" ]; then
+            unzip -o "$ZIP_FILE"
+          else
+            echo "No zip found!" && exit 1
+          fi
+          find . -name "*.xcodeproj" -maxdepth 5
+
+      - name: Set up App Store Connect API key
+        script: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_$APP_STORE_KEY_ID.p8
+          printf '%s' "$APP_STORE_PRIVATE_KEY" > "$KEY_PATH"
+          echo "Key size: $(wc -c < $KEY_PATH) bytes"
+          echo "First line: $(head -1 $KEY_PATH)"
+
+      - name: Revoke Development certificates and create Distribution via API
+        script: |
+          # Use Apple's API to revoke all Development certificates and create Distribution one
+          python3 << 'PYEOF'
+          import urllib.request
+          import urllib.parse
+          import json
+          import os
+          import time
+          import hashlib
+          import base64
+
+          # We'll use xcodebuild's built-in mechanism instead
+          # Just print status
+          print("Using xcodebuild automatic signing with App Store method")
+          PYEOF
+
+          KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_$APP_STORE_KEY_ID.p8
+          XCODE_PROJECT=$(find . -name "*.xcodeproj" -maxdepth 5 | head -1)
+
+          # Use xcrun to explicitly request App Store signing
+          xcrun xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_ISSUER_ID" \
+            -showBuildSettings 2>/dev/null | grep -E "SIGN|PROFILE|TEAM" || true
+
+          echo "Settings check complete"
+
+      - name: Build and archive
+        script: |
+          KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_$APP_STORE_KEY_ID.p8
+          XCODE_PROJECT=$(find . -name "*.xcodeproj" -maxdepth 5 | head -1)
+          echo "Building: $XCODE_PROJECT"
+
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$CM_BUILD_DIR/ParkSafe.xcarchive" \
+            clean archive \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_ISSUER_ID"
+
+      - name: Export IPA
+        script: |
+          KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_$APP_STORE_KEY_ID.p8
+
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$CM_BUILD_DIR/ParkSafe.xcarchive" \
+            -exportPath "$CM_EXPORT_DIR" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_ISSUER_ID" \
+            -exportOptionsPlist /dev/stdin <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+
+    artifacts:
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_BUILD_DIR/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_PRIVATE_KEY
+        key_id: $APP_STORE_KEY_ID
+        issuer_id: $APP_STORE_ISSUER_ID
+        submit_to_testflight: false
+        submit_to_app_store: false
