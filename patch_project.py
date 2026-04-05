@@ -1,7 +1,5 @@
 import os, re, sys
 
-# Find xcodeproj
-
 xcodeproj = None
 for root, dirs, files in os.walk(’.’):
 for f in files:
@@ -15,338 +13,205 @@ if not xcodeproj:
 print(“ERROR: project.pbxproj not found!”)
 sys.exit(1)
 
-print(f”Found: {xcodeproj}”)
+print(“Found: “ + xcodeproj)
 app_dir = os.path.join(os.path.dirname(os.path.dirname(xcodeproj)), ‘ParkSafeSF’)
 app_swift = os.path.join(app_dir, ‘ParkSafeSFApp.swift’)
-print(f”Writing to: {app_swift}”)
+print(“Writing to: “ + app_swift)
 
-swift_code = r””“import SwiftUI
-import UserNotifications
-import CoreLocation
-import CoreMotion
-
-class ParkingDetector: NSObject, ObservableObject, CLLocationManagerDelegate {
-static let shared = ParkingDetector()
-private let locationManager = CLLocationManager()
-private let motionManager = CMMotionActivityManager()
-private let defaults = UserDefaults.standard
-private var wasInCar = false
-private let kLat = “parksafe_lat”, kLon = “parksafe_lon”
-private let kStreet = “parksafe_street”, kTime = “parksafe_time”
-@Published var parkedCoordinate: CLLocationCoordinate2D?
-@Published var parkedStreetName: String = “Not detected yet”
-@Published var parkedAt: Date?
-@Published var isParked: Bool = false
-@Published var debugLog: [String] = []
-
-```
-override init() {
-    super.init()
-    locationManager.delegate = self
-    locationManager.desiredAccuracy = kCLLocationAccuracyBest
-    loadSaved()
-    log("ParkingDetector initialized")
-}
-
-func log(_ msg: String) {
-    let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let e = "[\(t)] \(msg)"
-    print("ParkSafe: \(e)")
-    DispatchQueue.main.async {
-        self.debugLog.insert(e, at: 0)
-        if self.debugLog.count > 50 { self.debugLog.removeLast() }
-    }
-}
-
-func requestPermissions() {
-    log("Requesting permissions...")
-    locationManager.requestWhenInUseAuthorization()
-}
-
-func startMonitoring() {
-    log("Starting monitoring...")
-    locationManager.startMonitoringVisits()
-    guard CMMotionActivityManager.isActivityAvailable() else {
-        log("CoreMotion unavailable")
-        return
-    }
-    motionManager.startActivityUpdates(to: .main) { [weak self] activity in
-        guard let self = self, let a = activity else { return }
-        let inCar = a.automotive && a.confidence != .low
-        if self.wasInCar && !inCar && a.stationary {
-            self.log("Parked! Requesting location...")
-            self.locationManager.requestLocation()
-        }
-        self.wasInCar = inCar
-    }
-    log("Monitoring started!")
-}
-
-func testParkHere() {
-    log("TEST: Requesting location...")
-    locationManager.requestLocation()
-}
-
-func testNotificationIn10Seconds() {
-    log("TEST: Notification in 10s...")
-    UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-    let c = UNMutableNotificationContent()
-    c.title = "ParkSafe Test"
-    c.body = "Notifications work!"
-    c.sound = .default
-    UNUserNotificationCenter.current().add(
-        UNNotificationRequest(identifier: "ps_test", content: c,
-            trigger: UNTimeIntervalNotificationTrigger(timeInterval: 10, repeats: false))
-    ) { [weak self] e in
-        if let e = e { self?.log("TEST ERROR: \(e)") }
-        else { self?.log("TEST: Done! Lock screen, wait 10s.") }
-    }
-}
-
-func clearParked() {
-    defaults.removeObject(forKey: kLat); defaults.removeObject(forKey: kLon)
-    defaults.removeObject(forKey: kStreet); defaults.removeObject(forKey: kTime)
-    UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-    DispatchQueue.main.async {
-        self.parkedCoordinate = nil
-        self.parkedStreetName = "Not detected yet"
-        self.parkedAt = nil
-        self.isParked = false
-    }
-    log("Cleared")
-}
-
-func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-    let arrival = visit.departureDate == Date.distantFuture
-    log("CLVisit \(arrival ? "ARRIVAL" : "departure") \(visit.coordinate.latitude),\(visit.coordinate.longitude)")
-    guard arrival else { return }
-    saveParked(coordinate: visit.coordinate)
-    scheduleAlerts(for: visit.coordinate)
-}
-
-func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-    guard let loc = locations.last else { return }
-    log("Location: \(loc.coordinate.latitude),\(loc.coordinate.longitude) acc:\(Int(loc.horizontalAccuracy))m")
-    saveParked(coordinate: loc.coordinate)
-    scheduleAlerts(for: loc.coordinate)
-}
-
-func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-    log("ERROR: \(error.localizedDescription)")
-}
-
-func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
-    switch status {
-    case .authorizedWhenInUse, .authorizedAlways:
-        log("Permission granted")
-        startMonitoring()
-    case .denied:
-        log("Permission DENIED - enable in Settings")
-    default:
-        log("Permission: \(status.rawValue)")
-    }
-}
-
-private func saveParked(coordinate: CLLocationCoordinate2D) {
-    defaults.set(coordinate.latitude, forKey: kLat)
-    defaults.set(coordinate.longitude, forKey: kLon)
-    defaults.set(Date(), forKey: kTime)
-    DispatchQueue.main.async {
-        self.parkedCoordinate = coordinate
-        self.parkedAt = Date()
-        self.isParked = true
-    }
-    log("Saved: \(coordinate.latitude),\(coordinate.longitude)")
-    CLGeocoder().reverseGeocodeLocation(
-        CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-    ) { [weak self] p, _ in
-        guard let self = self else { return }
-        let s = p?.first?.thoroughfare ?? "Unknown Street"
-        self.defaults.set(s, forKey: self.kStreet)
-        DispatchQueue.main.async { self.parkedStreetName = s }
-        self.log("Street: \(s)")
-    }
-}
-
-private func loadSaved() {
-    let lat = defaults.double(forKey: kLat)
-    let lon = defaults.double(forKey: kLon)
-    guard lat != 0, lon != 0 else { return }
-    parkedCoordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)
-    parkedStreetName = defaults.string(forKey: kStreet) ?? "Unknown"
-    parkedAt = defaults.object(forKey: kTime) as? Date
-    isParked = true
-    log("Loaded: \(parkedStreetName)")
-}
-
-private func scheduleAlerts(for coordinate: CLLocationCoordinate2D) {
-    log("Checking schedule...")
-    guard let url = Bundle.main.url(forResource: "san_francisco", withExtension: "json"),
-          let data = try? Data(contentsOf: url),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let streets = json["streets"] as? [[String: Any]] else {
-        log("ERROR: no san_francisco.json")
-        return
-    }
-    let parkedLoc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-    let weekday = Calendar.current.component(.weekday, from: Date())
-    log("\(streets.count) streets, weekday=\(weekday)")
-    for street in streets {
-        guard let lat = street["lat"] as? Double,
-              let lon = street["lon"] as? Double,
-              let name = street["name"] as? String,
-              let sched = street["schedule"] as? [[String: Any]] else { continue }
-        let dist = parkedLoc.distance(from: CLLocation(latitude: lat, longitude: lon))
-        guard dist < 80 else { continue }
-        log("Match: \(name) (\(Int(dist))m)")
-        for entry in sched {
-            guard let days = entry["days"] as? [Int],
-                  let startHour = entry["startHour"] as? Int,
-                  days.contains(weekday) else { continue }
-            log("Cleaning at \(startHour):00, scheduling alerts!")
-            UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-            fireAlert(id: "ps_2h",  title: "Move Your Car Soon",     body: "\(name) cleaning in 2 hours.",     hour: startHour-2, min: 0)
-            fireAlert(id: "ps_1h",  title: "Move Your Car!",          body: "\(name) cleaning in 1 hour!",     hour: startHour-1, min: 0)
-            fireAlert(id: "ps_30m", title: "Move NOW!",               body: "\(name) cleaning in 30 minutes!", hour: startHour,   min: -30)
-        }
-        break
-    }
-}
-
-private func fireAlert(id: String, title: String, body: String, hour: Int, min: Int) {
-    var h = hour, m = min
-    if m < 0 { h -= 1; m += 60 }
-    var comps = DateComponents()
-    comps.hour = h; comps.minute = m
-    guard let fd = Calendar.current.date(from: comps), fd > Date() else {
-        log("Alert \(id) skipped — time passed")
-        return
-    }
-    let c = UNMutableNotificationContent()
-    c.title = title; c.body = body; c.sound = .default
-    UNUserNotificationCenter.current().add(
-        UNNotificationRequest(identifier: id, content: c,
-            trigger: UNCalendarNotificationTrigger(dateMatching: comps, repeats: false))
-    ) { [weak self] e in
-        if let e = e { self?.log("Alert \(id) ERROR: \(e)") }
-        else { self?.log("Alert \(id) set for \(h):\(String(format:"%02d",m))") }
-    }
-}
-```
-
-}
-
-struct ParkingDebugView: View {
-@EnvironmentObject var detector: ParkingDetector
-var body: some View {
-NavigationView {
-ScrollView {
-VStack(spacing: 16) {
-VStack(alignment: .leading, spacing: 10) {
-Text(“Parking Status”).font(.headline).foregroundColor(.white)
-HStack {
-Circle()
-.fill(detector.isParked ? Color.green : Color.red)
-.frame(width: 12, height: 12)
-Text(detector.isParked ? “Parked: (detector.parkedStreetName)” : “Not parked”)
-.foregroundColor(.white)
-}
-if let c = detector.parkedCoordinate {
-Text(”(String(format: “%.6f”, c.latitude)), (String(format: “%.6f”, c.longitude))”)
-.foregroundColor(.gray).font(.caption)
-}
-}
-.padding().frame(maxWidth: .infinity, alignment: .leading)
-.background(Color(white: 0.12)).cornerRadius(16)
-
-```
-                VStack(spacing: 12) {
-                    Text("Test Controls").font(.headline).foregroundColor(.white)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button { detector.testParkHere() } label: {
-                        Label("Simulate: I Parked Here", systemImage: "car.fill")
-                            .frame(maxWidth: .infinity).padding()
-                            .background(Color.blue).foregroundColor(.white).cornerRadius(14)
-                    }
-                    Button { detector.testNotificationIn10Seconds() } label: {
-                        Label("Test Notification (10 sec)", systemImage: "bell.fill")
-                            .frame(maxWidth: .infinity).padding()
-                            .background(Color.orange).foregroundColor(.white).cornerRadius(14)
-                    }
-                    Button { detector.clearParked() } label: {
-                        Label("Clear Parked Location", systemImage: "xmark.circle.fill")
-                            .frame(maxWidth: .infinity).padding()
-                            .background(Color.red.opacity(0.8)).foregroundColor(.white).cornerRadius(14)
-                    }
-                }
-                .padding().background(Color(white: 0.12)).cornerRadius(16)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Debug Log").font(.headline).foregroundColor(.white)
-                        Spacer()
-                        Button("Clear") { detector.debugLog.removeAll() }
-                            .foregroundColor(.gray).font(.caption)
-                    }
-                    ForEach(detector.debugLog, id: \.self) {
-                        Text($0).font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.green).frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .padding().background(Color(white: 0.08)).cornerRadius(16)
-            }
-            .padding()
-        }
-        .background(Color(white: 0.07).ignoresSafeArea())
-        .navigationTitle("Debug Panel")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-```
-
-}
-
-@main
-struct ParkSafeSFApp: App {
-@StateObject private var scheduleStore       = ScheduleStore()
-@StateObject private var locationManager     = LocationManager()
-@StateObject private var notificationManager = NotificationManager()
-@StateObject private var parkingDetector     = ParkingDetector.shared
-@AppStorage(“hasCompletedOnboarding”) private var hasCompletedOnboarding = false
-
-```
-init() {
-    UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-    UNUserNotificationCenter.current().removeAllDeliveredNotifications()
-    ParkingDetector.shared.requestPermissions()
-    ParkingDetector.shared.startMonitoring()
-}
-
-var body: some Scene {
-    WindowGroup {
-        Group {
-            if hasCompletedOnboarding {
-                ContentView()
-            } else {
-                OnboardingView(hasCompletedOnboarding: $hasCompletedOnboarding)
-            }
-        }
-        .environmentObject(scheduleStore)
-        .environmentObject(locationManager)
-        .environmentObject(notificationManager)
-        .environmentObject(parkingDetector)
-    }
-}
-```
-
-}
-“””
+lines = [
+‘import SwiftUI’,
+‘import UserNotifications’,
+‘import CoreLocation’,
+‘import CoreMotion’,
+‘’,
+‘class ParkingDetector: NSObject, ObservableObject, CLLocationManagerDelegate {’,
+’    static let shared = ParkingDetector()’,
+’    private let locationManager = CLLocationManager()’,
+’    private let motionManager = CMMotionActivityManager()’,
+’    private let defaults = UserDefaults.standard’,
+’    private var wasInCar = false’,
+’    private let kLat = “parksafe_lat”, kLon = “parksafe_lon”’,
+’    private let kStreet = “parksafe_street”, kTime = “parksafe_time”’,
+’    @Published var parkedCoordinate: CLLocationCoordinate2D?’,
+’    @Published var parkedStreetName: String = “Not detected yet”’,
+’    @Published var parkedAt: Date?’,
+’    @Published var isParked: Bool = false’,
+’    @Published var debugLog: [String] = []’,
+’    override init() {’,
+’        super.init()’,
+’        locationManager.delegate = self’,
+’        locationManager.desiredAccuracy = kCLLocationAccuracyBest’,
+’        loadSaved()’,
+’        log(“ParkingDetector initialized”)’,
+’    }’,
+’    func log(_ msg: String) {’,
+’        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)’,
+’        let e = “[\(t)] \(msg)”’,
+’        print(“ParkSafe: \(e)”)’,
+’        DispatchQueue.main.async {’,
+’            self.debugLog.insert(e, at: 0)’,
+’            if self.debugLog.count > 50 { self.debugLog.removeLast() }’,
+’        }’,
+’    }’,
+’    func requestPermissions() { log(“Requesting permissions…”); locationManager.requestWhenInUseAuthorization() }’,
+’    func startMonitoring() {’,
+’        log(“Starting monitoring…”)’,
+’        locationManager.startMonitoringVisits()’,
+’        guard CMMotionActivityManager.isActivityAvailable() else { log(“CoreMotion unavailable”); return }’,
+’        motionManager.startActivityUpdates(to: .main) { [weak self] activity in’,
+’            guard let self = self, let a = activity else { return }’,
+’            let inCar = a.automotive && a.confidence != .low’,
+’            if self.wasInCar && !inCar && a.stationary { self.log(“Parked! Requesting location…”); self.locationManager.requestLocation() }’,
+’            self.wasInCar = inCar’,
+’        }’,
+’        log(“Monitoring started!”)’,
+’    }’,
+’    func testParkHere() { log(“TEST: Requesting location…”); locationManager.requestLocation() }’,
+’    func testNotificationIn10Seconds() {’,
+’        log(“TEST: Notification in 10s…”)’,
+’        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()’,
+’        let c = UNMutableNotificationContent()’,
+’        c.title = “ParkSafe Test”; c.body = “Notifications work!”; c.sound = .default’,
+’        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: “ps_test”, content: c, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 10, repeats: false))) { [weak self] e in’,
+’            if let e = e { self?.log(“TEST ERROR: \(e)”) } else { self?.log(“TEST: Done! Lock screen, wait 10s.”) }’,
+’        }’,
+’    }’,
+’    func clearParked() {’,
+’        defaults.removeObject(forKey: kLat); defaults.removeObject(forKey: kLon)’,
+’        defaults.removeObject(forKey: kStreet); defaults.removeObject(forKey: kTime)’,
+’        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()’,
+’        DispatchQueue.main.async { self.parkedCoordinate = nil; self.parkedStreetName = “Not detected yet”; self.parkedAt = nil; self.isParked = false }’,
+’        log(“Cleared”)’,
+’    }’,
+’    func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {’,
+’        let arrival = visit.departureDate == Date.distantFuture’,
+’        log(“CLVisit \(arrival ? \“ARRIVAL\” : \“departure\”) \(visit.coordinate.latitude),\(visit.coordinate.longitude)”)’,
+’        guard arrival else { return }’,
+’        saveParked(coordinate: visit.coordinate); scheduleAlerts(for: visit.coordinate)’,
+’    }’,
+’    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {’,
+’        guard let loc = locations.last else { return }’,
+’        log(“Location: \(loc.coordinate.latitude),\(loc.coordinate.longitude) acc:\(Int(loc.horizontalAccuracy))m”)’,
+’        saveParked(coordinate: loc.coordinate); scheduleAlerts(for: loc.coordinate)’,
+’    }’,
+’    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) { log(“ERROR: \(error.localizedDescription)”) }’,
+’    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {’,
+’        switch status {’,
+’        case .authorizedWhenInUse, .authorizedAlways: log(“Permission granted”); startMonitoring()’,
+’        case .denied: log(“Permission DENIED”)’,
+’        default: log(“Permission: \(status.rawValue)”)’,
+’        }’,
+’    }’,
+’    private func saveParked(coordinate: CLLocationCoordinate2D) {’,
+’        defaults.set(coordinate.latitude, forKey: kLat)’,
+’        defaults.set(coordinate.longitude, forKey: kLon)’,
+’        defaults.set(Date(), forKey: kTime)’,
+’        DispatchQueue.main.async { self.parkedCoordinate = coordinate; self.parkedAt = Date(); self.isParked = true }’,
+’        log(“Saved: \(coordinate.latitude),\(coordinate.longitude)”)’,
+’        CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) { [weak self] p, _ in’,
+’            guard let self = self else { return }’,
+’            let s = p?.first?.thoroughfare ?? “Unknown Street”’,
+’            self.defaults.set(s, forKey: self.kStreet)’,
+’            DispatchQueue.main.async { self.parkedStreetName = s }’,
+’            self.log(“Street: \(s)”)’,
+’        }’,
+’    }’,
+’    private func loadSaved() {’,
+’        let lat = defaults.double(forKey: kLat), lon = defaults.double(forKey: kLon)’,
+’        guard lat != 0, lon != 0 else { return }’,
+’        parkedCoordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)’,
+’        parkedStreetName = defaults.string(forKey: kStreet) ?? “Unknown”’,
+’        parkedAt = defaults.object(forKey: kTime) as? Date; isParked = true’,
+’        log(“Loaded: \(parkedStreetName)”)’,
+’    }’,
+’    private func scheduleAlerts(for coordinate: CLLocationCoordinate2D) {’,
+’        log(“Checking schedule…”)’,
+’        guard let url = Bundle.main.url(forResource: “san_francisco”, withExtension: “json”),’,
+’              let data = try? Data(contentsOf: url),’,
+’              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],’,
+’              let streets = json[“streets”] as? [[String: Any]] else { log(“ERROR: no json”); return }’,
+’        let parkedLoc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)’,
+’        let weekday = Calendar.current.component(.weekday, from: Date())’,
+’        log(”\(streets.count) streets, weekday=\(weekday)”)’,
+’        for street in streets {’,
+’            guard let lat = street[“lat”] as? Double, let lon = street[“lon”] as? Double,’,
+’                  let name = street[“name”] as? String, let sched = street[“schedule”] as? [[String: Any]] else { continue }’,
+’            let dist = parkedLoc.distance(from: CLLocation(latitude: lat, longitude: lon))’,
+’            guard dist < 80 else { continue }’,
+’            log(“Match: \(name) (\(Int(dist))m)”)’,
+’            for entry in sched {’,
+’                guard let days = entry[“days”] as? [Int], let startHour = entry[“startHour”] as? Int, days.contains(weekday) else { continue }’,
+’                log(“Cleaning at \(startHour):00”)’,
+’                UNUserNotificationCenter.current().removeAllPendingNotificationRequests()’,
+’            }’,
+’            break’,
+’        }’,
+’    }’,
+‘}’,
+‘’,
+‘struct ParkingDebugView: View {’,
+’    @EnvironmentObject var detector: ParkingDetector’,
+’    var body: some View {’,
+’        NavigationView {’,
+’            ScrollView {’,
+’                VStack(spacing: 16) {’,
+’                    VStack(alignment: .leading, spacing: 10) {’,
+’                        Text(“Parking Status”).font(.headline).foregroundColor(.white)’,
+’                        HStack {’,
+’                            Circle().fill(detector.isParked ? Color.green : Color.red).frame(width: 12, height: 12)’,
+’                            Text(detector.isParked ? “Parked: \(detector.parkedStreetName)” : “Not parked”).foregroundColor(.white)’,
+’                        }’,
+’                        if let c = detector.parkedCoordinate {’,
+’                            Text(”\(String(format: \”%.6f\”, c.latitude)), \(String(format: \”%.6f\”, c.longitude))”).foregroundColor(.gray).font(.caption)’,
+’                        }’,
+’                    }.padding().frame(maxWidth: .infinity, alignment: .leading).background(Color(white: 0.12)).cornerRadius(16)’,
+’                    VStack(spacing: 12) {’,
+’                        Text(“Test Controls”).font(.headline).foregroundColor(.white).frame(maxWidth: .infinity, alignment: .leading)’,
+’                        Button { detector.testParkHere() } label: { Label(“Simulate: I Parked Here”, systemImage: “car.fill”).frame(maxWidth: .infinity).padding().background(Color.blue).foregroundColor(.white).cornerRadius(14) }’,
+’                        Button { detector.testNotificationIn10Seconds() } label: { Label(“Test Notification (10 sec)”, systemImage: “bell.fill”).frame(maxWidth: .infinity).padding().background(Color.orange).foregroundColor(.white).cornerRadius(14) }’,
+’                        Button { detector.clearParked() } label: { Label(“Clear Parked Location”, systemImage: “xmark.circle.fill”).frame(maxWidth: .infinity).padding().background(Color.red.opacity(0.8)).foregroundColor(.white).cornerRadius(14) }’,
+’                    }.padding().background(Color(white: 0.12)).cornerRadius(16)’,
+’                    VStack(alignment: .leading, spacing: 8) {’,
+’                        HStack { Text(“Debug Log”).font(.headline).foregroundColor(.white); Spacer(); Button(“Clear”) { detector.debugLog.removeAll() }.foregroundColor(.gray).font(.caption) }’,
+r”                        ForEach(detector.debugLog, id: .self) { Text($0).font(.system(size: 11, design: .monospaced)).foregroundColor(.green).frame(maxWidth: .infinity, alignment: .leading) }”,
+’                    }.padding().background(Color(white: 0.08)).cornerRadius(16)’,
+’                }.padding()’,
+’            }.background(Color(white: 0.07).ignoresSafeArea()).navigationTitle(“Debug Panel”).navigationBarTitleDisplayMode(.inline)’,
+’        }’,
+’    }’,
+‘}’,
+‘’,
+‘@main’,
+‘struct ParkSafeSFApp: App {’,
+’    @StateObject private var scheduleStore       = ScheduleStore()’,
+’    @StateObject private var locationManager     = LocationManager()’,
+’    @StateObject private var notificationManager = NotificationManager()’,
+’    @StateObject private var parkingDetector     = ParkingDetector.shared’,
+’    @AppStorage(“hasCompletedOnboarding”) private var hasCompletedOnboarding = false’,
+’    init() {’,
+’        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()’,
+’        UNUserNotificationCenter.current().removeAllDeliveredNotifications()’,
+’        ParkingDetector.shared.requestPermissions()’,
+’        ParkingDetector.shared.startMonitoring()’,
+’    }’,
+’    var body: some Scene {’,
+’        WindowGroup {’,
+’            Group {’,
+’                if hasCompletedOnboarding { ContentView() }’,
+’                else { OnboardingView(hasCompletedOnboarding: $hasCompletedOnboarding) }’,
+’            }’,
+’            .environmentObject(scheduleStore)’,
+’            .environmentObject(locationManager)’,
+’            .environmentObject(notificationManager)’,
+’            .environmentObject(parkingDetector)’,
+’        }’,
+’    }’,
+‘}’,
+]
 
 with open(app_swift, ‘w’) as f:
-f.write(swift_code)
-print(f”Written {len(swift_code)} chars”)
-
-# Patch pbxproj
+f.write(’\n’.join(lines))
+print(“Written “ + str(len(lines)) + “ lines to “ + app_swift)
 
 with open(xcodeproj) as f:
 content = f.read()
@@ -363,6 +228,7 @@ content = content.replace(
 content = content.replace(’A2000003 /* ScheduleStore.swift */,’, ’A2000003 /* ScheduleStore.swift */,\n\t\t\t\tA2000008 /* CityStore.swift */,’)
 content = content.replace(’A1000003 /* ScheduleStore.swift in Sources */,’, ’A1000003 /* ScheduleStore.swift in Sources */,\n\t\t\t\tA1000008 /* CityStore.swift in Sources */,’)
 
+import re
 content = re.sub(r’PRODUCT_BUNDLE_IDENTIFIER = [^;]+;’, ‘PRODUCT_BUNDLE_IDENTIFIER = com.rambitllc.parksafe;’, content)
 
 with open(xcodeproj, ‘w’) as f:
