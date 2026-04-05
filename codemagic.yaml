@@ -26,8 +26,8 @@ workflows:
       - name: Bump version and build number
         script: |
           INFO_PLIST=$(find . -name "Info.plist" -not -path "*__MACOSX*" -not -path "*Pods*" | head -1)
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1" "$INFO_PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 10" "$INFO_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.2" "$INFO_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 11" "$INFO_PLIST"
           echo "Version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' $INFO_PLIST)"
           echo "Build: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' $INFO_PLIST)"
 
